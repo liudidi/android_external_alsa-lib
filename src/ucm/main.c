@@ -32,6 +32,7 @@
 
 #include "ucm_local.h"
 #include <stdarg.h>
+#define _GNU_SOURCE
 #include <pthread.h>
 
 /*

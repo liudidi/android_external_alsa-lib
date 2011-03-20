@@ -1135,7 +1135,7 @@ int uc_mgr_scan_master_configs(const char **_list[])
 		"%s", env ? env : ALSA_USE_CASE_DIR);
 	filename[MAX_FILE-1] = '\0';
 
-	err = scandir(filename, &namelist, filename_filter, versionsort);
+	err = scandir(filename, &namelist, filename_filter, 0);  // terrible fix by fattire. blame me.
 	if (err < 0) {
 		err = -errno;
 		uc_error("error: could not scan directory %s: %s",
