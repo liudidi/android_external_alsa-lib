@@ -413,6 +413,7 @@ beginning:</P>
 
 */
 
+
 #include <stdarg.h>
 #include <limits.h>
 #include <sys/stat.h>
@@ -423,11 +424,6 @@ beginning:</P>
 #endif
 
 #ifndef DOC_HIDDEN
-
-#ifdef HAVE_LIBPTHREAD
-static pthread_mutex_t snd_config_update_mutex =
-				PTHREAD_RECURSIVE_MUTEX_INITIALIZER;  //another bad fix by fattire was _NP
-#endif
 
 struct _snd_config {
 	char *id;
@@ -468,25 +464,6 @@ typedef struct {
 	int ch;
 } input_t;
 
-#ifdef HAVE_LIBPTHREAD
-
-static inline void snd_config_lock(void)
-{
-	pthread_mutex_lock(&snd_config_update_mutex);
-}
-
-static inline void snd_config_unlock(void)
-{
-	pthread_mutex_unlock(&snd_config_update_mutex);
-}
-
-#else
-
-static inline void snd_config_lock(void) { }
-static inline void snd_config_unlock(void) { }
-
-#endif
-
 static int safe_strtoll(const char *str, long long *val)
 {
 	long long v;
@@ -494,7 +471,7 @@ static int safe_strtoll(const char *str, long long *val)
 	if (!*str)
 		return -EINVAL;
 	errno = 0;
-	if (sscanf(str, "%lli%n", &v, &endidx) < 1)
+	if (sscanf(str, "%Li%n", &v, &endidx) < 1)
 		return -EINVAL;
 	if (str[endidx])
 		return -EINVAL;
@@ -522,38 +499,22 @@ static int safe_strtod(const char *str, double *val)
 {
 	char *end;
 	double v;
-#ifdef HAVE_USELOCALE
-	locale_t saved_locale, c_locale;
-#else
 	char *saved_locale;
 	char locstr[64]; /* enough? */
-#endif
 	int err;
 
 	if (!*str)
 		return -EINVAL;
-#ifdef HAVE_USELOCALE
-	c_locale = newlocale(LC_NUMERIC_MASK, "C", 0);
-	saved_locale = uselocale(c_locale);
-#else
 	saved_locale = setlocale(LC_NUMERIC, NULL);
 	if (saved_locale) {
 		snprintf(locstr, sizeof(locstr), "%s", saved_locale);
 		setlocale(LC_NUMERIC, "C");
 	}
-#endif
 	errno = 0;
 	v = strtod(str, &end);
 	err = -errno;
-#ifdef HAVE_USELOCALE
-	if (c_locale != (locale_t)0) {
-		uselocale(saved_locale);
-		freelocale(c_locale);
-	}
-#else
 	if (saved_locale)
 		setlocale(LC_NUMERIC, locstr);
-#endif
 	if (err)
 		return err;
 	if (*end)
@@ -1376,7 +1337,7 @@ static int _snd_config_save_node_value(snd_config_t *n, snd_output_t *out,
 		snd_output_printf(out, "%ld", n->u.integer);
 		break;
 	case SND_CONFIG_TYPE_INTEGER64:
-		snd_output_printf(out, "%lld", n->u.integer64);
+		snd_output_printf(out, "%Ld", n->u.integer64);
 		break;
 	case SND_CONFIG_TYPE_REAL:
 		snd_output_printf(out, "%-16g", n->u.real);
@@ -2628,7 +2589,7 @@ int snd_config_get_ascii(const snd_config_t *config, char **ascii)
 		{
 			char res[32];
 			int err;
-			err = snprintf(res, sizeof(res), "%lli", config->u.integer64);
+			err = snprintf(res, sizeof(res), "%Li", config->u.integer64);
 			if (err < 0 || err == sizeof(res)) {
 				assert(0);
 				return -ENOMEM;
@@ -3341,7 +3302,6 @@ static int snd_config_hooks(snd_config_t *config, snd_config_t *private_data)
 
 	if ((err = snd_config_search(config, "@hooks", &n)) < 0)
 		return 0;
-	snd_config_lock();
 	snd_config_remove(n);
 	do {
 		hit = 0;
@@ -3358,7 +3318,7 @@ static int snd_config_hooks(snd_config_t *config, snd_config_t *private_data)
 			if (i == idx) {
 				err = snd_config_hooks_call(config, n, private_data);
 				if (err < 0)
-					goto _err;
+					return err;
 				idx++;
 				hit = 1;
 			}
@@ -3367,7 +3327,6 @@ static int snd_config_hooks(snd_config_t *config, snd_config_t *private_data)
 	err = 0;
        _err:
 	snd_config_delete(n);
-	snd_config_unlock();
 	return err;
 }
 
@@ -3717,6 +3676,10 @@ int snd_config_update_r(snd_config_t **_top, snd_config_update_t **_update, cons
 	return 1;
 }
 
+#ifdef HAVE_LIBPTHREAD
+static pthread_mutex_t snd_config_update_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 /** 
  * \brief Updates #snd_config by rereading the global configuration files (if needed).
  * \return 0 if #snd_config was up to date, 1 if #snd_config was
@@ -3737,9 +3700,13 @@ int snd_config_update(void)
 {
 	int err;
 
-	snd_config_lock();
+#ifdef HAVE_LIBPTHREAD
+	pthread_mutex_lock(&snd_config_update_mutex);
+#endif
 	err = snd_config_update_r(&snd_config, &snd_config_global_update, NULL);
-	snd_config_unlock();
+#ifdef HAVE_LIBPTHREAD
+	pthread_mutex_unlock(&snd_config_update_mutex);
+#endif
 	return err;
 }
 
@@ -3772,14 +3739,18 @@ int snd_config_update_free(snd_config_update_t *update)
  */
 int snd_config_update_free_global(void)
 {
-	snd_config_lock();
+#ifdef HAVE_LIBPTHREAD
+	pthread_mutex_lock(&snd_config_update_mutex);
+#endif
 	if (snd_config)
 		snd_config_delete(snd_config);
 	snd_config = NULL;
 	if (snd_config_global_update)
 		snd_config_update_free(snd_config_global_update);
 	snd_config_global_update = NULL;
-	snd_config_unlock();
+#ifdef HAVE_LIBPTHREAD
+	pthread_mutex_unlock(&snd_config_update_mutex);
+#endif
 	/* FIXME: better to place this in another place... */
 	snd_dlobj_cache_cleanup();
 
@@ -4670,7 +4641,7 @@ int snd_config_expand(snd_config_t *config, snd_config_t *root, const char *args
 		snd_config_delete(subs);
 	return err;
 }
-
+	
 /**
  * \brief Searches for a definition in a configuration tree, using
  *        aliases and expanding hooks and arguments.
@@ -4720,15 +4691,10 @@ int snd_config_search_definition(snd_config_t *config,
 	 *  if key contains dot (.), the implicit base is ignored
 	 *  and the key starts from root given by the 'config' parameter
 	 */
-	snd_config_lock();
 	err = snd_config_search_alias_hooks(config, strchr(key, '.') ? NULL : base, key, &conf);
-	if (err < 0) {
-		snd_config_unlock();
+	if (err < 0)
 		return err;
-	}
-	err = snd_config_expand(conf, config, args, NULL, result);
-	snd_config_unlock();
-	return err;
+	return snd_config_expand(conf, config, args, NULL, result);
 }
 
 #ifndef DOC_HIDDEN

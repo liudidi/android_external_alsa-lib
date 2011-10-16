@@ -94,7 +94,8 @@ int snd_ctl_close(snd_ctl_t *ctl)
 	}
 	err = ctl->ops->close(ctl);
 	free(ctl->name);
-	snd_dlobj_cache_put(ctl->open_func);
+	if (ctl->dl_handle)
+		snd_dlclose(ctl->dl_handle);
 	free(ctl);
 	return err;
 }
@@ -767,6 +768,7 @@ static int snd_ctl_open_conf(snd_ctl_t **ctlp, const char *name,
 #ifndef PIC
 	extern void *snd_control_open_symbols(void);
 #endif
+	void *h = NULL;
 	if (snd_config_get_type(ctl_conf) != SND_CONFIG_TYPE_COMPOUND) {
 		if (name)
 			SNDERR("Invalid type for CTL %s definition", name);
@@ -852,22 +854,40 @@ static int snd_ctl_open_conf(snd_ctl_t **ctlp, const char *name,
 #ifndef PIC
 	snd_control_open_symbols();
 #endif
-	open_func = snd_dlobj_cache_get(lib, open_name,
-			SND_DLSYM_VERSION(SND_CONTROL_DLSYM_VERSION), 1);
+	open_func = snd_dlobj_cache_lookup(open_name);
 	if (open_func) {
-		err = open_func(ctlp, name, ctl_root, ctl_conf, mode);
-		if (err >= 0) {
-			(*ctlp)->open_func = open_func;
-			err = 0;
-		} else {
-			snd_dlobj_cache_put(open_func);
-		}
-	} else {
+		err = 0;
+		goto _err;
+	}
+	h = snd_dlopen(lib, RTLD_NOW);
+	if (h)
+		open_func = snd_dlsym(h, open_name, SND_DLSYM_VERSION(SND_CONTROL_DLSYM_VERSION));
+	err = 0;
+	if (!h) {
+		SNDERR("Cannot open shared library %s", lib);
+		err = -ENOENT;
+	} else if (!open_func) {
+		SNDERR("symbol %s is not defined inside %s", open_name, lib);
+		snd_dlclose(h);
 		err = -ENXIO;
 	}
        _err:
 	if (type_conf)
 		snd_config_delete(type_conf);
+	if (err >= 0) {
+		err = open_func(ctlp, name, ctl_root, ctl_conf, mode);
+		if (err >= 0) {
+			if (h /*&& (mode & SND_CTL_KEEP_ALIVE)*/) {
+				snd_dlobj_cache_add(open_name, h, open_func);
+				h = NULL;
+			}
+			(*ctlp)->dl_handle = h;
+			err = 0;
+		} else {
+			if (h)
+				snd_dlclose(h);
+		}
+	}
 	free(buf);
 	free(buf1);
 	return err;
